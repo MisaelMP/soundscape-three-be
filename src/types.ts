@@ -1,26 +1,31 @@
-import { WebSocket } from 'ws';
-
-export interface RoomClient {
-	ws: WebSocket;
-	userId: string;
-	lastSeen: number;
+interface Particle {
+	position: [number, number, number];
+	rotation: number;
+	scale: number;
+	velocity: [number, number, number];
 }
 
-export interface Room {
+interface User {
 	id: string;
-	clients: Map<string, RoomClient>;
-	lastCleanup: number;
+	color: number;
+	particles?: Particle[];
+	lastUpdate: number;
 }
 
-export interface WebSocketMessage {
-	type: 'user_joined' | 'user_left' | 'init' | 'update' | 'ping' | 'pong';
+interface Room {
+	users: Map<string, User>;
+	lastActivity: number;
+}
+
+interface Message {
+	type: 'user_joined' | 'user_left' | 'init' | 'update' | 'sync';
 	userId: string;
 	timestamp: number;
-	particles?: Array<{
-		position: [number, number, number];
-		rotation: number;
-		scale: number;
-		velocity: [number, number, number];
-	}>;
+	particles?: Particle[];
 	color?: number;
+	roomState?: Array<{
+		userId: string;
+		color: number;
+		particles?: Particle[];
+	}>;
 }

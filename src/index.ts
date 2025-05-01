@@ -1,105 +1,141 @@
 import express from 'express';
 import { createServer } from 'http';
-import { WebSocketServer } from 'ws';
+import { Server } from 'socket.io';
 import cors from 'cors';
-import { RoomManager } from './RoomManager';
-import { WebSocketMessage } from './types';
 
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
-const roomManager = new RoomManager();
-
-// Enable CORS
-app.use(cors());
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-	res.json({ status: 'ok' });
+const io = new Server(server, {
+	cors: {
+		origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+		methods: ['GET', 'POST'],
+	},
 });
 
-wss.on('connection', (ws, req) => {
-	const roomId = req.url?.split('/').pop() || 'default';
-	let userId: string | undefined;
+// Health check
+app.use(cors());
+app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
-	console.log(`🔌 New connection attempt to room: ${roomId}`);
+// Room state
+const rooms = new Map<string, Room>();
+const socketToUser = new Map<string, string>();
 
-	// Handle messages
-	ws.on('message', (message) => {
+// Cleanup every 5 mins
+setInterval(() => {
+	const now = Date.now();
+	for (const [roomId, room] of rooms.entries()) {
+		if (now - room.lastActivity > 5 * 60 * 1000) {
+			rooms.delete(roomId);
+			console.log('🧹 Cleaned inactive room:', roomId);
+		}
+	}
+}, 5 * 60 * 1000);
+
+io.on('connection', (socket) => {
+	const userId = socket.handshake.query.userId as string;
+	const roomId = socket.handshake.query.roomId as string;
+
+	if (!userId || !roomId) {
+		console.error('Missing userId or roomId');
+		socket.disconnect();
+		return;
+	}
+
+	if (!rooms.has(roomId)) {
+		console.log(`Creating new room: ${roomId}`);
+		rooms.set(roomId, { users: new Map(), lastActivity: Date.now() });
+	}
+	const room = rooms.get(roomId)!;
+
+	// Add user to room
+	room.users.set(userId, {
+		id: userId,
+		color: 0xffffff,
+		lastUpdate: Date.now(),
+	});
+	socketToUser.set(socket.id, userId);
+	socket.join(roomId);
+
+	// Log current room state
+	console.log(`Room ${roomId} state:`, {
+		users: Array.from(room.users.keys()),
+		userCount: room.users.size,
+	});
+
+	// Broadcast user joined to all clients in the room
+	console.log(`Broadcasting user_joined for ${userId} to room ${roomId}`);
+	io.to(roomId).emit('message', {
+		type: 'user_joined',
+		userId: userId,
+		timestamp: Date.now(),
+	});
+
+	socket.on('update', (message: any) => {
 		try {
-			const data = JSON.parse(message.toString()) as WebSocketMessage;
-			console.log(
-				`📨 Received message type "${data.type}" from user ${data.userId}`
-			);
-
-			// Handle user identification
-			if (data.type === 'user_joined' && data.userId) {
-				// Check if user already exists in the room
-				const room = roomManager.getRoom(roomId);
-				if (room?.clients.has(data.userId)) {
-					console.log(
-						`⚠️ User ${data.userId} already exists in room ${roomId}, closing old connection`
-					);
-					// Close the old connection
-					const oldClient = room.clients.get(data.userId);
-					if (oldClient?.ws.readyState === ws.OPEN) {
-						oldClient.ws.close();
-					}
-					room.clients.delete(data.userId);
-				}
-
-				userId = data.userId;
-				roomManager.addClient(roomId, userId, ws);
-
-				// Notify others about new user
-				const message: WebSocketMessage = {
-					type: 'user_joined',
+			room.lastActivity = Date.now();
+			console.log(`Received update from ${userId}:`, message);
+			const user = room.users.get(userId);
+			if (user) {
+				user.particles = message.particles;
+				user.color = message.color || user.color;
+				user.lastUpdate = Date.now();
+				// Broadcast update to all other clients
+				console.log(`Broadcasting update from ${userId} to room ${roomId}`);
+				socket.to(roomId).emit('message', {
+					type: 'update',
 					userId: userId,
 					timestamp: Date.now(),
-				};
-				roomManager.broadcastToRoom(roomId, message, userId);
+					particles: message.particles,
+					color: message.color,
+				});
 			}
-
-			// Only broadcast if we have a userId
-			if (userId) {
-				roomManager.broadcastToRoom(roomId, data, userId);
-			}
-		} catch (error) {
-			console.error('❌ Error processing message:', error);
+		} catch (err) {
+			console.error('Error handling update:', err);
 		}
 	});
 
-	// Handle disconnection
-	ws.on('close', () => {
-		if (userId) {
-			console.log(`🔌 Connection closed for user ${userId} in room ${roomId}`);
-			roomManager.removeClient(roomId, userId);
-		}
-	});
+	socket.on('disconnect', () => {
+		const uid = socketToUser.get(socket.id);
+		if (!uid) return;
+		console.log(`${uid} disconnected from room ${roomId}`);
+		room.users.delete(uid);
+		socketToUser.delete(socket.id);
 
-	// Handle errors
-	ws.on('error', (error) => {
-		console.error(
-			`❌ WebSocket error for user ${userId} in room ${roomId}:`,
-			error
-		);
-		if (userId) {
-			roomManager.removeClient(roomId, userId);
+		console.log(`Broadcasting user_left for ${uid}`);
+		io.to(roomId).emit('message', {
+			type: 'user_left',
+			userId: uid,
+			timestamp: Date.now(),
+		});
+
+		if (room.users.size === 0) {
+			console.log(`Deleting empty room: ${roomId}`);
+			rooms.delete(roomId);
 		}
 	});
 });
 
-// Handle server shutdown
+// Broadcast room state every 50ms
+setInterval(() => {
+	for (const [roomId, room] of rooms.entries()) {
+		const clients = Array.from(room.users.values());
+		if (clients.length > 0) {
+			console.log(`Broadcasting room state for ${roomId}:`, {
+				userCount: clients.length,
+				users: clients.map((u) => u.id),
+			});
+			io.to(roomId).emit('clients', clients);
+		}
+	}
+}, 50);
+
+// Shutdown
 process.on('SIGTERM', () => {
-	console.log('🛑 Server shutting down...');
-	roomManager.cleanup();
-	server.close(() => {
-		console.log('✅ Server closed');
-		process.exit(0);
-	});
+	console.log('Server shutting down...');
+	server.close(() => process.exit(0));
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-	console.log(`🚀 Server running on port ${PORT}`);
+	console.log(`Server running on http://localhost:${PORT}`);
 });
