@@ -5,21 +5,36 @@ import cors from 'cors';
 
 const app = express();
 const server = createServer(app);
+
+// Ensure the frontend URL doesn't have trailing slashes
+const FRONTEND_URL = (
+	process.env.FRONTEND_URL || 'http://localhost:5173'
+).replace(/\/$/, '');
+
 const io = new Server(server, {
 	cors: {
-		origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+		origin: FRONTEND_URL,
 		methods: ['GET', 'POST'],
 		credentials: true,
 		allowedHeaders: ['Content-Type', 'Authorization'],
 	},
 	transports: ['websocket', 'polling'],
 	allowEIO3: true,
+	path: '/socket.io/',
+	pingTimeout: 60000,
+	pingInterval: 25000,
+	upgradeTimeout: 30000,
+	allowUpgrades: true,
+	perMessageDeflate: false,
+	httpCompression: {
+		threshold: 2048,
+	},
 });
 
 // Health check
 app.use(
 	cors({
-		origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+		origin: FRONTEND_URL,
 		credentials: true,
 	})
 );
