@@ -9,11 +9,20 @@ const io = new Server(server, {
 	cors: {
 		origin: process.env.FRONTEND_URL || 'http://localhost:5173',
 		methods: ['GET', 'POST'],
+		credentials: true,
+		allowedHeaders: ['Content-Type', 'Authorization'],
 	},
+	transports: ['websocket', 'polling'],
+	allowEIO3: true,
 });
 
 // Health check
-app.use(cors());
+app.use(
+	cors({
+		origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+		credentials: true,
+	})
+);
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
 // Room state
